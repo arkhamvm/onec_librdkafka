@@ -80,7 +80,15 @@ bool Consumer1C::GetPropVal(const long lPropNum, tVariant* pvarPropVal)
 		}
 		case 6: {
 			std::string err_desc = err_to_str(LastError);
-			allocString(pvarPropVal, err_desc.c_str(), err_desc.size());
+			// Reported as a failed property read rather than as an empty
+			// description. This can only fire when there was no memory left for
+			// the string or when the description itself is not valid UTF-8; in
+			// both cases the value 1C used to receive was VTYPE_EMPTY, never a
+			// readable description, so no working script loses anything - and a
+			// silent "no error" on the one property a script consults while it
+			// is already handling an error is the worst possible answer.
+			if (!allocString(pvarPropVal, err_desc.c_str(), err_desc.size()))
+				return false;
 			break;
 		}
 		case 7: {
@@ -554,7 +562,18 @@ bool Consumer1C::ReceiveJSONMessages(tVariant* pvarRetValue, tVariant* paParams,
 		return ret;
 	}
 
-	allocString(pvarRetValue, Res.value.c_str(), Res.value.size());
+	// The batch is already gone at this point when
+	// RemoveMessagesFromLocalQueueOnJSONBuild is set: JSON_KafkaMessagePool
+	// deletes every message it serialises. A payload that is not valid UTF-8 -
+	// binary data read with base64encode = False - makes the conversion fail,
+	// and without this the script received an empty string, a successful call
+	// and an empty ErrorDescription while the whole poll was lost for good.
+	std::string alloc_error;
+	if (!allocString(pvarRetValue, Res.value.c_str(), Res.value.size(), &alloc_error)) {
+		SetError(err(ERR_UNHANDLED, "cannot return the message pool to 1C: " + alloc_error
+			+ ". Binary payloads have to be requested with the base64 parameter set to True"));
+		return ret;
+	}
 	return ret;
 }
 //---------------------------------------------------------------------------//
@@ -579,7 +598,13 @@ bool Consumer1C::ReceiveOnecInternalMessages(tVariant* pvarRetValue, tVariant* p
 		return ret;
 	}
 
-	allocString(pvarRetValue, Res.value.c_str(), Res.value.size());
+	// Same loss as in ReceiveJSONMessages above - the pool may already be empty.
+	std::string alloc_error;
+	if (!allocString(pvarRetValue, Res.value.c_str(), Res.value.size(), &alloc_error)) {
+		SetError(err(ERR_UNHANDLED, "cannot return the message pool to 1C: " + alloc_error
+			+ ". Binary payloads have to be requested with the base64 parameter set to True"));
+		return ret;
+	}
 	return ret;
 }
 //---------------------------------------------------------------------------//
@@ -655,7 +680,14 @@ bool Consumer1C::QueryWatermarkOffsets(tVariant* pvarRetValue, tVariant* paParam
 		return ret;
 	}
 
-	allocString(pvarRetValue, res.value.c_str(), res.value.size());
+	// Nothing is lost here - the offsets can be queried again - but an empty
+	// string with no error reads in 1C as a JSON parsing failure of unknown
+	// origin, so the reason is reported like every other failure of this call.
+	std::string alloc_error;
+	if (!allocString(pvarRetValue, res.value.c_str(), res.value.size(), &alloc_error)) {
+		SetError(err(ERR_UNHANDLED, "cannot return the watermark offsets to 1C: " + alloc_error));
+		return ret;
+	}
 	return ret;
 }
 //---------------------------------------------------------------------------//
@@ -681,7 +713,12 @@ bool Consumer1C::CommittedOffset(tVariant* pvarRetValue, tVariant* paParams, con
 		return ret;
 	}
 	std::string t = std::to_string(committed.value);
-	allocString(pvarRetValue, t.c_str(), t.size());
+	std::string alloc_error;
+	if (!allocString(pvarRetValue, t.c_str(), t.size(), &alloc_error)) {
+		// Plain decimal digits, so only the allocation can fail here.
+		SetError(err(ERR_UNHANDLED, "cannot return the committed offset to 1C: " + alloc_error));
+		return ret;
+	}
 
 	return ret;
 }

@@ -31,7 +31,11 @@ bool AdminClient1C::GetPropVal(const long lPropNum, tVariant* pvarPropVal)
 	switch (lPropNum) {
 		case 0: {
 			std::string err_desc = err_to_str(LastError);
-			allocString(pvarPropVal, err_desc.c_str(), err_desc.size());
+			// See Consumer1C::GetPropVal: a description that cannot be handed
+			// over is reported as a failed property read, never as an empty
+			// description that reads like "no error".
+			if (!allocString(pvarPropVal, err_desc.c_str(), err_desc.size()))
+				return false;
 			break;
 		}
 		default: {
@@ -232,7 +236,14 @@ bool AdminClient1C::DeleteRecordsBefore(tVariant* pvarRetValue, tVariant* paPara
 		return ret;
 	}
 
-	allocString(pvarRetValue, Res.value.c_str(), Res.value.size());
+	// Nothing is lost when this fails - the request can be repeated - but an
+	// empty string with no error reads in 1C as an unexplained JSON parsing
+	// failure, so the reason travels with it.
+	std::string alloc_error;
+	if (!allocString(pvarRetValue, Res.value.c_str(), Res.value.size(), &alloc_error)) {
+		SetError(err(ERR_UNHANDLED, "cannot return the result to 1C: " + alloc_error));
+		return ret;
+	}
 	return ret;
 }
 //---------------------------------------------------------------------------//
@@ -268,7 +279,14 @@ bool AdminClient1C::GetGroupOffsets(tVariant* pvarRetValue, tVariant* paParams, 
 		return ret;
 	}
 
-	allocString(pvarRetValue, Res.value.c_str(), Res.value.size());
+	// Nothing is lost when this fails - the request can be repeated - but an
+	// empty string with no error reads in 1C as an unexplained JSON parsing
+	// failure, so the reason travels with it.
+	std::string alloc_error;
+	if (!allocString(pvarRetValue, Res.value.c_str(), Res.value.size(), &alloc_error)) {
+		SetError(err(ERR_UNHANDLED, "cannot return the result to 1C: " + alloc_error));
+		return ret;
+	}
 	return ret;
 }
 //---------------------------------------------------------------------------//
@@ -300,7 +318,14 @@ bool AdminClient1C::GetGroupList(tVariant* pvarRetValue, tVariant* paParams, con
 		return ret;
 	}
 
-	allocString(pvarRetValue, Res.value.c_str(), Res.value.size());
+	// Nothing is lost when this fails - the request can be repeated - but an
+	// empty string with no error reads in 1C as an unexplained JSON parsing
+	// failure, so the reason travels with it.
+	std::string alloc_error;
+	if (!allocString(pvarRetValue, Res.value.c_str(), Res.value.size(), &alloc_error)) {
+		SetError(err(ERR_UNHANDLED, "cannot return the result to 1C: " + alloc_error));
+		return ret;
+	}
 	return ret;
 }
 //---------------------------------------------------------------------------//
@@ -341,7 +366,14 @@ bool AdminClient1C::GetMetadata(tVariant* pvarRetValue, tVariant* paParams, cons
 		return ret;
 	}
 
-	allocString(pvarRetValue, Res.value.c_str(), Res.value.size());
+	// Nothing is lost when this fails - the request can be repeated - but an
+	// empty string with no error reads in 1C as an unexplained JSON parsing
+	// failure, so the reason travels with it.
+	std::string alloc_error;
+	if (!allocString(pvarRetValue, Res.value.c_str(), Res.value.size(), &alloc_error)) {
+		SetError(err(ERR_UNHANDLED, "cannot return the result to 1C: " + alloc_error));
+		return ret;
+	}
 	return ret;
 }
 //---------------------------------------------------------------------------//
@@ -377,7 +409,14 @@ bool AdminClient1C::AlterGroupOffsets(tVariant* pvarRetValue, tVariant* paParams
 		return ret;
 	}
 
-	allocString(pvarRetValue, Res.value.c_str(), Res.value.size());
+	// Nothing is lost when this fails - the request can be repeated - but an
+	// empty string with no error reads in 1C as an unexplained JSON parsing
+	// failure, so the reason travels with it.
+	std::string alloc_error;
+	if (!allocString(pvarRetValue, Res.value.c_str(), Res.value.size(), &alloc_error)) {
+		SetError(err(ERR_UNHANDLED, "cannot return the result to 1C: " + alloc_error));
+		return ret;
+	}
 	return ret;
 }
 //---------------------------------------------------------------------------//
@@ -413,7 +452,14 @@ bool AdminClient1C::DeleteGroupOffsets(tVariant* pvarRetValue, tVariant* paParam
 		return ret;
 	}
 
-	allocString(pvarRetValue, Res.value.c_str(), Res.value.size());
+	// Nothing is lost when this fails - the request can be repeated - but an
+	// empty string with no error reads in 1C as an unexplained JSON parsing
+	// failure, so the reason travels with it.
+	std::string alloc_error;
+	if (!allocString(pvarRetValue, Res.value.c_str(), Res.value.size(), &alloc_error)) {
+		SetError(err(ERR_UNHANDLED, "cannot return the result to 1C: " + alloc_error));
+		return ret;
+	}
 	return ret;
 }
 //---------------------------------------------------------------------------//
@@ -444,7 +490,14 @@ bool AdminClient1C::QueryWatermarkOffsets(tVariant* pvarRetValue, tVariant* paPa
 		SetError(Res.error);
 		return ret;
 	}
-	allocString(pvarRetValue, Res.value.c_str(), Res.value.size());
+	// Nothing is lost when this fails - the request can be repeated - but an
+	// empty string with no error reads in 1C as an unexplained JSON parsing
+	// failure, so the reason travels with it.
+	std::string alloc_error;
+	if (!allocString(pvarRetValue, Res.value.c_str(), Res.value.size(), &alloc_error)) {
+		SetError(err(ERR_UNHANDLED, "cannot return the result to 1C: " + alloc_error));
+		return ret;
+	}
 	return ret;
 }
 //---------------------------------------------------------------------------//

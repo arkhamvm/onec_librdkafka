@@ -62,16 +62,35 @@ namespace KafkaExport
 			KafkaExport::RetValue ClearHeaderFilter();
 
 		private:
-			void escape_string_simple(std::string* buffer, const char* data, size_t len = 0);
-			void append_key_value_string(std::string* buffer, const char* key, const char* data, size_t len = 0);
-			void append_key_value_value(std::string* buffer, const char* key, const char* data, size_t len = 0);
-			void append_key_value_escaped_string(std::string* buffer, const char* key, const char* data, size_t len = 0);
-			void append_key_value_base64_encoded_string(std::string* buffer, const char* key, const unsigned char* data, size_t len = 0);
+			// Sentinel for "no length supplied, measure the NUL-terminated string yourself".
+			// It used to be 0, which collided with a length that is legitimately zero: a Kafka
+			// tombstone has payload() == nullptr and len() == 0, so the helpers below called
+			// strlen(nullptr) and segfaulted, and an empty-but-non-null value made strlen run
+			// forward into the neighbouring records of the same fetch buffer and splice their
+			// bytes into the JSON handed to 1C.
+			static const size_t kMeasureLength = static_cast<size_t>(-1);
+
+			// No kMeasureLength default here, unlike the append_* helpers below. This one
+			// is the raw escaper: every caller already holds the byte count of the buffer
+			// it is escaping, and a defaulted sentinel would be a trap rather than a
+			// convenience - the sentinel is SIZE_MAX, so a call that forgot the length
+			// would walk the heap until it faulted. Making the length mandatory lets the
+			// compiler reject that call instead.
+			void escape_string_simple(std::string* buffer, const char* data, size_t len);
+			void append_key_value_string(std::string* buffer, const char* key, const char* data, size_t len = kMeasureLength);
+			void append_key_value_value(std::string* buffer, const char* key, const char* data, size_t len = kMeasureLength);
+			// "<key>":<token> for a payload the caller asked NOT to escape, where the
+			// payload may be absent or empty. See the definition: absent becomes null,
+			// present-but-empty becomes "". Length is mandatory for the same reason as
+			// escape_string_simple above - Kafka always hands one over.
+			void append_key_value_raw_json(std::string* buffer, const char* key, const char* data, size_t len);
+			void append_key_value_escaped_string(std::string* buffer, const char* key, const char* data, size_t len = kMeasureLength);
+			void append_key_value_base64_encoded_string(std::string* buffer, const char* key, const unsigned char* data, size_t len = kMeasureLength);
 			
 			void internal_escape_string_simple(std::string* buffer, const char* data, size_t len);
-			void internal_clmnstr(std::string* buffer, const char* value, size_t len = 0, bool comma = true);
-			void internal_clmnbin(std::string* buffer, const unsigned char* value, size_t len = 0, bool comma = true);
-			void internal_clmnnum(std::string* buffer, const char* value, size_t len = 0);			
+			void internal_clmnstr(std::string* buffer, const char* value, size_t len = kMeasureLength, bool comma = true);
+			void internal_clmnbin(std::string* buffer, const unsigned char* value, size_t len = kMeasureLength, bool comma = true);
+			void internal_clmnnum(std::string* buffer, const char* value, size_t len = kMeasureLength);			
 		};		
 	}
 }

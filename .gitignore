@@ -1,0 +1,21 @@
+# build trees
+/build/
+/build-x64/
+/build-x86/
+/.build/
+
+# build artifacts
+/out32/
+/out64/
+
+# librdkafka + vcpkg archives built locally by scripts/build-librdkafka-windows.ps1;
+# they must never be committed (lib/win64/README.md, BUILD.md section 4.4)
+/lib/win32/*.lib
+/lib/win64/*.lib
+
+# MSVC / IDE
+*.user
+*.suo
+.vs/
+.idea/
+cmake-build-*/

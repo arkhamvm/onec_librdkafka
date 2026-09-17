@@ -231,9 +231,24 @@ KafkaExport::StringValueResult DataBuilder::JSON_GetJSONWatermarkOffsets(KafkaEx
 //---------------------------------------------------------------------------//
 void DataBuilder::escape_string_simple(std::string* buffer, const char* data, size_t len)
 {
-	char buff[6];
+	// Hex digits for the \uXXXX escapes below. Lower case is what this function
+	// has always emitted and what 1C's JSON reader expects; either case is legal
+	// JSON, so keeping it stable avoids churning consumers that compare strings.
+	static const char hex_digits[] = "0123456789abcdef";
 
-	for (int c = 0; c != len; c++) {
+	// Absent buffer, nothing to escape. The append_* helpers upstream already
+	// turn a null payload into an empty one, so this only fires if a future
+	// caller reaches the escaper directly - which it must not do with a null
+	// pointer and a non-zero length, hence the guard instead of a crash. Note
+	// that len has no default in the declaration: it is always supplied, so the
+	// kMeasureLength sentinel never reaches here.
+	if (data == nullptr) return;
+
+	// size_t, not int: len comes from RdKafka::Message::len(), which is a size_t.
+	// "c != len" on an int counter promoted the counter to size_t and would run
+	// off the end (signed overflow, undefined behaviour) on a payload longer than
+	// INT_MAX. Kafka's message.max.bytes can legitimately be set that high.
+	for (size_t c = 0; c < len; ++c) {
 
 		switch (data[c]) {
 
@@ -258,23 +273,38 @@ void DataBuilder::escape_string_simple(std::string* buffer, const char* data, si
 		case '\t':
 			buffer->append("\\t");
 			break;
-		default:
-			if ('\x00' <= data[c] && data[c] <= '\x1f') {
-
-				buffer->append("\\u");
-				sprintf(buff, "u%04x", int(data[c]));
-				buffer->append(buff);
+		default: {
+			// Read the byte through unsigned char so the range test does not
+			// depend on whether plain char is signed on this target. Exactly the
+			// C0 controls 0x00..0x1F are escaped; every byte >= 0x80 - that is,
+			// every UTF-8 lead and continuation byte - is copied through
+			// untouched, which is what keeps multi-byte UTF-8 intact.
+			const unsigned char byte = static_cast<unsigned char>(data[c]);
+			if (byte <= 0x1Fu) {
+				// \u00XX, assembled by hand. The old code appended the two
+				// characters \ and u and then sprintf()ed "u%04x" after them,
+				// emitting \uu001f - JSON that 1C rejects outright. Building the
+				// escape from a hex table also removes the fixed-size sprintf
+				// buffer entirely: nothing here can overrun, whatever the byte,
+				// and there is no per-character formatting cost on a path that
+				// carries millions of messages.
+				buffer->append("\\u00", 4);
+				buffer->push_back(hex_digits[(byte >> 4) & 0x0Fu]);
+				buffer->push_back(hex_digits[byte & 0x0Fu]);
 			}
 			else {
 				buffer->push_back(data[c]);
 			}
+			break;
+		}
 		}
 	}
 }
 //---------------------------------------------------------------------------//
 void DataBuilder::append_key_value_string(std::string* buffer, const char* key, const char* data, size_t len)
 {
-	if (len == 0) len = strlen(data);
+	if (data == nullptr) { data = ""; len = 0; }
+	else if (len == kMeasureLength) len = strlen(data);
 
 	buffer->append("\"");
 	buffer->append(key);
@@ -285,7 +315,8 @@ void DataBuilder::append_key_value_string(std::string* buffer, const char* key, 
 //---------------------------------------------------------------------------//
 void DataBuilder::append_key_value_value(std::string* buffer, const char* key, const char* data, size_t len)
 {
-	if (len == 0) len = strlen(data);
+	if (data == nullptr) { data = ""; len = 0; }
+	else if (len == kMeasureLength) len = strlen(data);
 
 	buffer->append("\"");
 	buffer->append(key);
@@ -293,9 +324,42 @@ void DataBuilder::append_key_value_value(std::string* buffer, const char* key, c
 	buffer->append(data, len);
 }
 //---------------------------------------------------------------------------//
+void DataBuilder::append_key_value_raw_json(std::string* buffer, const char* key, const char* data, size_t len)
+{
+	// The Escape* properties are off for this field, so the payload is pasted
+	// into the document as a JSON token of its own - append_key_value_value
+	// writes no quotes. That works only while there are bytes to paste: a Kafka
+	// payload can be absent (a tombstone, where payload() / value_string()
+	// return nullptr) or present but zero length, and pasting nothing leaves
+	// "Value": immediately followed by the next comma. 1C's ReadJSON rejects
+	// the WHOLE document on that, so one absent value would destroy an entire
+	// batch instead of one message.
+	//
+	// Absent becomes null, present-but-empty becomes "". Kafka treats the two
+	// as genuinely different - a tombstone deletes the key in a compacted
+	// topic, an empty value does not - so the distinction is preserved rather
+	// than flattened into one of them.
+	//
+	// This is deliberately NOT folded into append_key_value_value: that helper
+	// also emits the numbers (Partition, Timestamp, Offset) and the literal
+	// "Headers":[ opener, and none of those may ever be rewritten into a quoted
+	// string or a null.
+	if (data == nullptr) {
+		append_key_value_value(buffer, key, "null", 4);
+		return;
+	}
+	if (len == kMeasureLength) len = strlen(data);
+	if (len == 0) {
+		append_key_value_string(buffer, key, "", 0);
+		return;
+	}
+	append_key_value_value(buffer, key, data, len);
+}
+//---------------------------------------------------------------------------//
 void DataBuilder::append_key_value_escaped_string(std::string* buffer, const char* key, const char* data, size_t len)
 {
-	if (len == 0) len = strlen(data);
+	if (data == nullptr) { data = ""; len = 0; }
+	else if (len == kMeasureLength) len = strlen(data);
 
 	buffer->append("\"");
 	buffer->append(key);
@@ -307,7 +371,8 @@ void DataBuilder::append_key_value_escaped_string(std::string* buffer, const cha
 //---------------------------------------------------------------------------//
 void DataBuilder::append_key_value_base64_encoded_string(std::string* buffer, const char* key, const unsigned char* data, size_t len)
 {
-	if (len == 0) len = strlen((const char*)data);
+	if (data == nullptr) { data = (const unsigned char*)""; len = 0; }
+	else if (len == kMeasureLength) len = strlen((const char*)data);
 
 	buffer->append("\"");
 	buffer->append(key);
@@ -357,7 +422,7 @@ KafkaExport::StringValueResult DataBuilder::JSON_KafkaMessagePool(std::vector<Rd
 					if (EscapeMessageKey)
 						append_key_value_escaped_string(&Res.value, "Key", local_queue->at(i)->key()->c_str(), local_queue->at(i)->key()->size());
 					else
-						append_key_value_value(&Res.value, "Key", local_queue->at(i)->key()->c_str(), local_queue->at(i)->key()->size());
+						append_key_value_raw_json(&Res.value, "Key", local_queue->at(i)->key()->c_str(), local_queue->at(i)->key()->size());
 				}
 				else {
 					append_key_value_string(&Res.value, "Key", "");
@@ -368,7 +433,7 @@ KafkaExport::StringValueResult DataBuilder::JSON_KafkaMessagePool(std::vector<Rd
 				if (EscapeMessageValue)
 					append_key_value_escaped_string(&Res.value, "Value", (const char*)local_queue->at(i)->payload(), local_queue->at(i)->len());
 				else
-					append_key_value_value(&Res.value, "Value", (const char*)local_queue->at(i)->payload(), local_queue->at(i)->len());
+					append_key_value_raw_json(&Res.value, "Value", (const char*)local_queue->at(i)->payload(), local_queue->at(i)->len());
 			}
 			else {
 				//Key
@@ -410,7 +475,10 @@ KafkaExport::StringValueResult DataBuilder::JSON_KafkaMessagePool(std::vector<Rd
 					if (EscapeMessageHeaderKey)
 						append_key_value_escaped_string(&Res.value, "Key", hdrs[HeaderIndex].key().c_str(), hdrs[HeaderIndex].key().size());
 					else
-						append_key_value_value(&Res.value, "Key", hdrs[HeaderIndex].key().c_str(), hdrs[HeaderIndex].key().size());
+						// A header key is never null (Header::key() returns a std::string
+						// by value) but it can legitimately be zero length, which would
+						// leave "Key": with nothing after it.
+						append_key_value_raw_json(&Res.value, "Key", hdrs[HeaderIndex].key().c_str(), hdrs[HeaderIndex].key().size());
 
 					Res.value.append(",");
 					if (!base64encode) {
@@ -418,7 +486,9 @@ KafkaExport::StringValueResult DataBuilder::JSON_KafkaMessagePool(std::vector<Rd
 						if (EscapeMessageHeaderValue)
 							append_key_value_escaped_string(&Res.value, "Value", hdrs[HeaderIndex].value_string(), hdrs[HeaderIndex].value_size());
 						else
-							append_key_value_value(&Res.value, "Value", hdrs[HeaderIndex].value_string(), hdrs[HeaderIndex].value_size());
+							// value_string() returning nullptr is normal in Kafka: a header
+							// is allowed to carry a null value, and that is not an error.
+							append_key_value_raw_json(&Res.value, "Value", hdrs[HeaderIndex].value_string(), hdrs[HeaderIndex].value_size());
 					}
 					else {
 						//Value
@@ -448,7 +518,14 @@ KafkaExport::StringValueResult DataBuilder::JSON_KafkaMessagePool(std::vector<Rd
 //---------------------------------------------------------------------------//
 void DataBuilder::internal_escape_string_simple(std::string* buffer, const char* data, size_t len)
 {
-	for (int c = 0; c != len; c++) {
+	// Same guard as escape_string_simple: internal_clmnstr already replaces a
+	// null value with an empty one, so this is only reachable from a future
+	// caller. len has no default here either.
+	if (data == nullptr) return;
+
+	// size_t counter: see escape_string_simple - an int counter compared
+	// against a size_t length is undefined behaviour past INT_MAX bytes.
+	for (size_t c = 0; c < len; ++c) {
 
 		switch (data[c]) {
 
@@ -463,7 +540,8 @@ void DataBuilder::internal_escape_string_simple(std::string* buffer, const char*
 //---------------------------------------------------------------------------//
 void DataBuilder::internal_clmnstr(std::string* buffer, const char* value, size_t len, bool comma)
 {
-	if (len == 0) len = strlen(value);
+	if (value == nullptr) { value = ""; len = 0; }
+	else if (len == kMeasureLength) len = strlen(value);
 	
 	if (comma) buffer->append(",");
 	buffer->append("{\"S\",\"");
@@ -474,7 +552,8 @@ void DataBuilder::internal_clmnstr(std::string* buffer, const char* value, size_
 //---------------------------------------------------------------------------//
 void DataBuilder::internal_clmnbin(std::string* buffer, const unsigned char* value, size_t len, bool comma)
 {
-	if (len == 0) len = strlen((const char*)value);
+	if (value == nullptr) { value = (const unsigned char*)""; len = 0; }
+	else if (len == kMeasureLength) len = strlen((const char*)value);
 	
 	if (comma) buffer->append(",");
 	buffer->append("{\"#\",87126200-3e98-44e0-b931-ccb1d7edc497,{1,{#base64:");
@@ -484,8 +563,14 @@ void DataBuilder::internal_clmnbin(std::string* buffer, const unsigned char* val
 //---------------------------------------------------------------------------//
 void DataBuilder::internal_clmnnum(std::string* buffer, const char* value, size_t len)
 {
-	if (len == 0) len = strlen(value);
-	
+	// Same shape as the JSON side: this column is written unquoted, so an empty
+	// one would emit {"N",} and make 1C reject the whole value-table blob, not
+	// just the one row. Every caller passes a sprintf()ed number, so the zero is
+	// unreachable today - it is here so that it stays a number if that changes.
+	if (value == nullptr) { value = "0"; len = 1; }
+	else if (len == kMeasureLength) len = strlen(value);
+	if (len == 0) { value = "0"; len = 1; }
+
 	buffer->append(",{\"N\",");
 	buffer->append(value, len);
 	buffer->append("}");

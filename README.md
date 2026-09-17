@@ -1,75 +1,108 @@
-# onec_librdkafka
-Внешняя компонента 1с (native) для взаимодействия с Apache Kafka
+# onec-librdkafka
+
+Внешняя компонента 1С (Native API) для работы с Apache Kafka.
+
+Форк [skalkindv/onec_librdkafka](https://github.com/skalkindv/onec_librdkafka) с обновлённой
+librdkafka. Апстрим зафиксирован на librdkafka 2.3.0, в которой не работает SSL с брокерами
+Kafka 4.x — здесь librdkafka обновлена до **v2.15.1**.
 
     Под капотом: https://github.com/confluentinc/librdkafka
-    Статические библиотеки для сборки - включены в проект
+    librdkafka v2.15.1
 
-	librdkafka v2.3.0
+## Отличия от апстрима
+
+* librdkafka 2.3.0 → **2.15.1** (пересобраны статические библиотеки).
+* Заголовки `src/rdkafka.h` и `src/rdkafkacpp.h` вендорятся **без изменений**.
+  В апстриме в них правились две вещи, теперь они вынесены наружу:
+  * `LIBRDKAFKA_STATICLIB` задаётся в `CMakeLists.txt` через `target_compile_definitions`;
+  * конфликт `winsock2.h` / `windows.h` решается порядком включения в `src/stdafx.h` (PCH)
+    вместо подмены `#include <winsock2.h>` на `#include <windows.h>` в `rdkafka.h`.
+* Сборка librdkafka воспроизводима — см. `scripts/`, а не «бинарники, закоммиченные однажды».
+* Linux x86 (32 бита) не поддерживается: `lib/linux32` не содержит сборки 2.15.1.
+  CMake упадёт с понятным сообщением. Нужен 32-битный вариант — соберите его
+  `scripts/build-librdkafka-linux.sh` под `gcc-multilib`.
+
+## Что включено в librdkafka
+
+| Фича | Linux x64 | Windows |
+|---|---|---|
+| SSL / TLS (OpenSSL 3.5.7) | ✅ | ✅ |
+| SASL PLAIN / SCRAM | ✅ | ✅ |
+| SASL OAUTHBEARER + OIDC (curl) | ✅ | ✅ |
+| SASL GSSAPI / Kerberos (Cyrus) | ❌ | ❌ |
+| gzip (zlib), zstd, lz4, snappy | ✅ | ✅ |
+
+GSSAPI/Kerberos отключён: `--source-deps-only` не собирает Cyrus SASL из исходников.
+Если он нужен — соберите librdkafka с системным `libsasl2-dev` и обновите `lib/linux64`.
 
 # Сборка
-Сборка под linux:
-	
-    Окружение:
-		GLIBC 2.31
-		gcc 9.4.0
-		g++ 9.4.0
-		cmake 3.16.3
 
-	Зависимости:
-		uuid-dev
-			
-	Статические библиотеки (включены в проект):
-		librdkafka++.a
-		librdkafka-static.a
-		
-		Для Linux - libssl, libcrypto, libcurl, libzstd, zlib - влинкованы в librdkafka-static.a
-	
-	Сборка:
-		X64: 
-			mkdir -p build
-			cd build
-			rm -r *
-			cmake ../.
-			cmake --build .
-			
-		X32:
-			mkdir -p build
-			cd build
-			rm -r *
-			cmake -DCMAKE_CXX_FLAGS=-m32 -DCMAKE_SHARED_LINKER_FLAGS=-m32 ../.
-			cmake --build .
-		
-Сборка под windows:		
-	
-	Окружение:
-		cl - 19.24.28315
-		link - 14.24.28315.0
-		msbuild - 16.4.0+e901037fe
-		Platform Toolset - v142
-				
-	Статические библиотеки (включены в проект):
-		libcrypto.lib
-		libssl.lib
-		libcurl.lib
-		librdkafka.lib
-		librdkafkacpp.lib
-		libzstd_static.lib
-		zlibstat.lib
-		
-	Сборка:
-		X64:
-			mkdir build
-			cd build
-			rd . /S /Q
-			cmake ../.
-			cmake --build . --config Release
-			
-		X32:
-			mkdir build
-			cd build
-			rd . /S /Q
-			cmake ../. -A Win32
-			cmake --build . --config Release
+**Подробное руководство — [BUILD.md](BUILD.md).** Там требования по платформам с точными
+именами пакетов, пошаговая сборка под Linux и Windows, проверка готового бинарника
+и разбор отказов, на которые здесь уже наступали. Ниже — краткая выжимка.
+
+Статические библиотеки librdkafka **не лежат в репозитории для Windows** — их нужно собрать
+один раз локально (см. ниже). Для Linux x64 они закоммичены в `lib/linux64`.
+
+## Linux x64
+
+    Окружение:
+        glibc 2.31+
+        gcc / g++ 9+
+        cmake 3.10+
+        git, make, perl (нужен для сборки OpenSSL)
+
+    1. Пересобрать librdkafka (нужно только при смене версии):
+
+        scripts/build-librdkafka-linux.sh v2.15.1
+
+       Скрипт собирает OpenSSL, zlib, zstd и curl из исходников и влинковывает их
+       в librdkafka-static.a, после чего кладёт .a в lib/linux64, а заголовки в src/.
+
+       Внимание: сборку нельзя вести на разделе без POSIX-прав (NTFS/exFAT через fuseblk) —
+       libtool падает на `install`. Скрипт это определяет сам и уходит собирать в $TMPDIR.
+
+    2. Собрать компоненту:
+
+        scripts/build-component-linux.sh
+
+       Результат: out64/librdkafka_onec.so
+
+    Ручной вариант шага 2:
+
+        mkdir -p build && cd build && rm -rf *
+        cmake -DCMAKE_BUILD_TYPE=Release ..
+        cmake --build .
+
+## Windows x64 / x86
+
+    Окружение:
+        Visual Studio 2019+ (MSVC v142+), Platform Toolset v142 или новее
+        cmake 3.15+
+        git
+
+    Запускать из "x64 Native Tools Command Prompt for VS" (или Developer PowerShell).
+
+    1. Собрать librdkafka и её зависимости (vcpkg подтягивается автоматически в .build\vcpkg):
+
+        powershell -ExecutionPolicy Bypass -File scripts\build-librdkafka-windows.ps1
+
+       Зависимости ставятся триплетом x64-windows-static, то есть со статической CRT (/MT) —
+       так же, как собирается сама компонента. Результат: lib\win64\*.lib и обновлённые src\*.h.
+
+       Для 32 бит: -Arch x86 (кладёт в lib\win32).
+
+    2. Собрать компоненту:
+
+        powershell -ExecutionPolicy Bypass -File scripts\build-component-windows.ps1
+
+       Результат: out64\rdkafka_onec.dll
+
+    Ручной вариант шага 2:
+
+        mkdir build && cd build
+        cmake ../. -A x64 -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+        cmake --build . --config Release
 
 # API получателя
 #### Initialize(стрСписокБрокеров, стрИмяГруппы);
@@ -633,12 +666,12 @@
 		{
 			"Brokers": [{
 				"Id": 0,
-				"Host": "adm-fko-dev-kfk1.dns-shop.ru",
+				"Host": "kafka-1.example.com",
 				"Port": 9092,
 				"Controller": true
 				}],
 			"Topics": [{
-				"Topic": "scrapper-jobs-queue-ozon",
+				"Topic": "my-topic",
 				"Partitions": [{
 						"Id": 0,
 						"Leader": 0,

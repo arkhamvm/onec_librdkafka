@@ -1,0 +1,133 @@
+# Kafka 4.x test broker for the onec-librdkafka test suite.
+#
+# Single-node KRaft (no ZooKeeper - removed in Kafka 4.0), two client listeners:
+#   PLAINTEXT  localhost:9092  for debugging / quick sanity checks
+#   SSL        localhost:9093  the listener the TLS test actually uses
+# plus an internal CONTROLLER listener on 9094 that is never advertised.
+#
+# Everything is parameterised from .env, which docker compose loads
+# automatically because it sits next to this file.
+#
+#   ./gen-certs.sh && ./up.sh      start
+#   ./down.sh                      stop and wipe the data volume
+
+name: onec-librdkafka-test
+
+services:
+
+  kafka:
+    image: apache/kafka:${KAFKA_IMAGE_TAG}
+    container_name: onec-librdkafka-test-kafka
+    hostname: kafka
+    restart: unless-stopped
+
+    # Host port == container port on purpose: advertised.listeners below hands
+    # out these very port numbers, and the test binary runs on the host.
+    ports:
+      - "127.0.0.1:${KAFKA_PLAINTEXT_PORT}:${KAFKA_PLAINTEXT_PORT}"
+      - "127.0.0.1:${KAFKA_SSL_PORT}:${KAFKA_SSL_PORT}"
+
+    volumes:
+      # The apache/kafka entrypoint resolves ssl.keystore.location and the
+      # password files relative to /etc/kafka/secrets.
+      - ./secrets:/etc/kafka/secrets:ro
+      - kafka-data:/var/lib/kafka/data
+
+    environment:
+      # --- KRaft ---------------------------------------------------------
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID}
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9094
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+
+      # --- Listeners -----------------------------------------------------
+      KAFKA_LISTENERS: >-
+        PLAINTEXT://0.0.0.0:${KAFKA_PLAINTEXT_PORT},SSL://0.0.0.0:${KAFKA_SSL_PORT},CONTROLLER://0.0.0.0:9094
+      # Resolvable from the host, where the test binary lives. The container
+      # publishes both ports on 127.0.0.1, so "localhost" is correct on the
+      # host; inside the container it is correct as well (it is the broker).
+      KAFKA_ADVERTISED_LISTENERS: >-
+        PLAINTEXT://localhost:${KAFKA_PLAINTEXT_PORT},SSL://localhost:${KAFKA_SSL_PORT}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: >-
+        CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL
+
+      # --- TLS on the SSL listener ---------------------------------------
+      # *_FILENAME / *_CREDENTIALS are consumed by /etc/kafka/docker/configure,
+      # which turns them into ssl.keystore.location + ssl.keystore.password.
+      KAFKA_SSL_KEYSTORE_FILENAME: kafka.keystore.jks
+      KAFKA_SSL_KEYSTORE_CREDENTIALS: keystore_creds
+      KAFKA_SSL_KEY_CREDENTIALS: key_creds
+      KAFKA_SSL_KEYSTORE_TYPE: JKS
+      # configure only derives the truststore when client auth is on, so it is
+      # spelled out here. Kafka insists on a truststore for an SSL listener.
+      KAFKA_SSL_TRUSTSTORE_LOCATION: /etc/kafka/secrets/kafka.truststore.jks
+      KAFKA_SSL_TRUSTSTORE_PASSWORD: ${KAFKA_CERT_PASSWORD}
+      KAFKA_SSL_TRUSTSTORE_TYPE: JKS
+      # Server TLS only - no mTLS. The client side just needs ca.pem.
+      KAFKA_SSL_CLIENT_AUTH: none
+      KAFKA_SSL_ENABLED_PROTOCOLS: TLSv1.2,TLSv1.3
+
+      # --- Single-node conveniences --------------------------------------
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      # Consumer group tests should not wait three seconds for a rebalance.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+    # Two independent proofs of life, so up.sh can block on "healthy" instead
+    # of sleeping: the broker answers a real Kafka API request on PLAINTEXT,
+    # and the SSL listener completes a verified TLS handshake.
+    healthcheck:
+      # Kept on one line on purpose: a folded YAML scalar would smuggle real
+      # newlines into the shell command and split it into broken fragments.
+      test:
+        - CMD-SHELL
+        - "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:${KAFKA_PLAINTEXT_PORT} >/dev/null 2>&1 && openssl s_client -connect localhost:${KAFKA_SSL_PORT} -CAfile /etc/kafka/secrets/ca.pem -verify_hostname localhost -verify_return_error -brief </dev/null >/dev/null 2>&1"
+      interval: 5s
+      timeout: 25s
+      retries: 40
+      start_period: 15s
+
+  # One-shot init step: creates the test topic over the SSL listener, which
+  # doubles as an end-to-end check that a real Kafka client can speak TLS to
+  # this broker. Shares the broker's network namespace so that the advertised
+  # "localhost:9093" points at the broker here too.
+  kafka-init:
+    image: apache/kafka:${KAFKA_IMAGE_TAG}
+    container_name: onec-librdkafka-test-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    network_mode: "service:kafka"
+    restart: "no"
+    volumes:
+      - ./secrets:/etc/kafka/secrets:ro
+    environment:
+      KAFKA_TEST_TOPIC: ${KAFKA_TEST_TOPIC}
+      KAFKA_SSL_PORT: ${KAFKA_SSL_PORT}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        BS="localhost:$${KAFKA_SSL_PORT}"
+        CFG=/etc/kafka/secrets/client-ssl.properties
+        echo "==> creating topic '$${KAFKA_TEST_TOPIC}' over SSL at $${BS}"
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$${BS}" \
+          --command-config "$$CFG" \
+          --create --if-not-exists \
+          --topic "$${KAFKA_TEST_TOPIC}" --partitions 1 --replication-factor 1
+        echo "==> topics visible over SSL:"
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$${BS}" \
+          --command-config "$$CFG" --list
+        echo "==> init done"
+
+volumes:
+  kafka-data:

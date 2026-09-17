@@ -1,0 +1,17 @@
+# Сборочное дерево тестов (cmake -S tests -B tests/build, run-tests.sh).
+/build/
+/build-*/
+cmake-build-*/
+
+# TLS-материал, который генерирует docker/gen-certs.sh.
+# Продублировано из docker/.gitignore намеренно: правило без ведущего слэша
+# ловит secrets/ в любом подкаталоге tests/, а не только в docker/.
+secrets/
+.secrets.tmp.*/
+
+# Логи librdkafka, которые пишет kafka_ssl_test ($KAFKA_TEST_LOG).
+*.log
+
+# Результаты ctest, если кто-то запустит его не из build/.
+Testing/
+CTestTestfile.cmake

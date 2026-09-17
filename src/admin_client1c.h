@@ -16,8 +16,12 @@ namespace KafkaExport
 		private:	
 			std::string brokers;
 			rd_kafka_t *rk = nullptr;
-			rd_kafka_conf_t *conf = nullptr;	
-			rd_kafka_conf_t *rk_conf = nullptr;	
+			rd_kafka_conf_t *conf = nullptr;
+			// The copy of conf handed to rd_kafka_new(). Non-null only while this
+			// object still owns it, i.e. after a failed rd_kafka_new(); the call
+			// takes ownership when it succeeds, and Initialize() destroys it and
+			// clears this pointer when it does not.
+			rd_kafka_conf_t *rk_conf = nullptr;
 
 			std::string errstr;
 			char errbuf[512];

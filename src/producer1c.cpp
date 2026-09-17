@@ -53,7 +53,11 @@ bool Producer1C::GetPropVal(const long lPropNum, tVariant* pvarPropVal)
 		}
 		case 4: {
 			std::string err_desc = err_to_str(LastError);
-			allocString(pvarPropVal, err_desc.c_str(), err_desc.size());
+			// See Consumer1C::GetPropVal: a description that cannot be handed
+			// over is reported as a failed property read, never as an empty
+			// description that reads like "no error".
+			if (!allocString(pvarPropVal, err_desc.c_str(), err_desc.size()))
+				return false;
 			break;
 		}
 		default: {
@@ -280,7 +284,16 @@ bool Producer1C::GetJSONDeliveryReport(tVariant* pvarRetValue, tVariant* paParam
 		SetError(res.error);
 		return ret;
 	}
-	allocString(pvarRetValue, res.value.c_str(), res.value.size());
+	// The records survive the call, so the report can be asked for again - but
+	// only if the script is told that this one did not arrive. The report is
+	// built through nlohmann, which rejects ill-formed UTF-8 itself, so in
+	// practice this is the out-of-memory path; an empty string on its own would
+	// read in 1C as an empty report.
+	std::string alloc_error;
+	if (!allocString(pvarRetValue, res.value.c_str(), res.value.size(), &alloc_error)) {
+		SetError(err(ERR_UNHANDLED, "cannot return the delivery report to 1C: " + alloc_error));
+		return ret;
+	}
 	return ret;
 }
 //---------------------------------------------------------------------------//

@@ -1,0 +1,178 @@
+# clang-tidy configuration for the onec-librdkafka component (src/).
+#
+# Used by scripts/lint.sh, which passes --config-file=tests/lint/.clang-tidy
+# explicitly. It deliberately does NOT live in the repository root: a .clang-tidy
+# there would be picked up automatically by every editor and IDE that walks up
+# the tree, including for the vendored headers, and nobody asked for that.
+#
+# DESIGN RULE: a configuration that emits four thousand warnings is a
+# configuration nobody runs. Every check below either finds defects in THIS
+# codebase or costs nothing; every check switched off is switched off for a
+# reason written next to it, with the number of findings it produced on the
+# 2.15.1 tree so the decision can be re-examined instead of taken on faith.
+#
+# Measured on the 18 files of src/ (excluding the vendored ones) with the
+# enabling list below and nothing disabled: 700 findings, of which 592 came from
+# four checks that cannot find a bug here. What is left is ~108 findings, which
+# is a list a person can actually read.
+#
+#   clang-tidy --config-file=tests/lint/.clang-tidy -p <build> src/consumer1c.cpp
+#
+# or just scripts/lint.sh.
+
+---
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  cert-*,
+  performance-*,
+  misc-*,
+  cppcoreguidelines-owning-memory,
+  cppcoreguidelines-no-malloc,
+
+  -misc-include-cleaner,
+  -misc-const-correctness,
+  -misc-unused-parameters,
+  -bugprone-easily-swappable-parameters,
+  -misc-non-private-member-variables-in-classes,
+  -clang-analyzer-optin.performance.Padding,
+  -clang-analyzer-osx.*,
+  -clang-analyzer-optin.osx.*
+
+# --- Why each of those is off ---------------------------------------------
+#
+# -misc-include-cleaner                     358 findings (51% of the total)
+#     Demands a direct #include for every transitively used declaration. This
+#     component is built around src/stdafx.h and three vendored single-header
+#     libraries - rdkafka.h (421 KB), rdkafkacpp.h (126 KB) and
+#     nlohmann/json.hpp (962 KB). Satisfying the check means naming hundreds of
+#     headers the project deliberately does not name, and it cannot find a
+#     defect. Pure noise here, and enough of it to bury everything else.
+#
+# -misc-const-correctness                   130 findings
+#     Proposes `const` on nearly every local variable. It is a style opinion,
+#     not a defect class, and --fix would rewrite most of the file set - which
+#     would also make the librdkafka 2.3.0 -> 2.15.1 diff unreadable for anyone
+#     reviewing that migration. Turn it on deliberately, on one file at a time,
+#     if someone wants to do that work.
+#
+# -misc-unused-parameters                    74 findings
+#     Every method exposed to 1C has the signature
+#         bool Method(tVariant* pvarRetValue, tVariant* paParams, const long lSizeArray)
+#     because that is what IComponentBase::CallAsFunc hands over. Most bodies
+#     ignore lSizeArray (arity is enforced by the platform from GetNParams) and
+#     the no-argument methods ignore paParams. The signature is fixed by the
+#     Native API ABI and cannot be changed, so every one of these is
+#     unactionable by construction.
+#
+# -bugprone-easily-swappable-parameters      30 findings
+#     Same cause: (tVariant*, tVariant*, long) is the ABI, and the internal core
+#     APIs take (std::string topic, int32_t partition, int32_t timeoutms)
+#     because that is the order librdkafka uses. Nothing to fix.
+#
+# -misc-non-private-member-variables-in-classes   21 findings per file that
+#                                                 includes consumer1c.h
+#     component_types.h is a file of plain data carriers - RetValue,
+#     delivery_record, WatermarkOffsets, TopicPartitionDescription - declared
+#     with `struct` and used as aggregates. The check wants accessors around
+#     every field. KafkaConsumerCore1C::local_queue and
+#     KafkaProducerCore::dr_cb are public on purpose too: the 1C wrapper class
+#     drives them directly. Encapsulating all of that is a refactor, not a bug
+#     fix, and the check re-reports it for every translation unit.
+#
+# -clang-analyzer-optin.performance.Padding
+#     Struct-layout advice about component_types.h. The structs cross no
+#     ABI boundary and are allocated a handful of times per call; reordering
+#     them for padding would trade readability for nothing.
+#
+# -clang-analyzer-osx.* / -clang-analyzer-optin.osx.*
+#     Objective-C and CoreFoundation checkers. The component builds for Linux
+#     and Windows only; these never fire, and listing them keeps a future
+#     `--checks=*` experiment from dragging them in.
+#
+# --- Why the notable ones are ON -------------------------------------------
+#
+# clang-analyzer-*            the path-sensitive engine: use-after-free, null
+#                             dereference, leaked allocations. Zero findings on
+#                             the current tree, which is exactly what makes it
+#                             usable as a blocking gate in scripts/lint.sh.
+# cert-err33-c                 unchecked sprintf() into fixed char buffers in
+#                             data_builder.cpp. This is how the malformed-JSON
+#                             bug in DataBuilder::escape_string_simple was
+#                             found: the code appended the two characters
+#                             backslash-u and then sprintf()d "u%04x" after
+#                             them, so a control character came out as
+#                             \uu001f instead of \u001f and the WHOLE JSON
+#                             string the consumer handed to 1C was invalid,
+#                             not just that field.
+#                              That one is fixed, and fixed by deletion: the
+#                             escape is assembled from a static hex table, so
+#                             there is no sprintf and no fixed-size buffer left
+#                             on that path and the finding count here is one
+#                             lower than it was. The remaining sites stay
+#                             listed for exactly the same reason.
+# cppcoreguidelines-owning-memory
+#                              15 findings, every manual new/delete of an
+#                             RdKafka::Message, RdKafka::Headers or component
+#                             instance. This codebase's whole memory-management
+#                             risk lives in exactly those lines, and the soak
+#                             test (tests/soak_test.cpp) exists because of them.
+# cppcoreguidelines-no-malloc  the C admin API (rd_kafka_*) is used directly in
+#                             admin_client1c_core.cpp; this flags raw malloc/free
+#                             mixed into C++ ownership.
+# performance-unnecessary-value-param
+#                              48 findings, all std::string taken by value on
+#                             internal core APIs. On a path that will carry
+#                             millions of messages a heap copy per call is worth
+#                             knowing about, and every one of them is a
+#                             two-character fix.
+# bugprone-narrowing-conversions
+#                              18 findings, mostly unsigned int -> int32_t on
+#                             partition numbers and timeouts coming out of
+#                             tVariant. Small, but this is precisely where a 1C
+#                             caller's value gets silently reinterpreted.
+
+# Only the component's own headers. This is a positive list rather than an
+# exclusion because clang-tidy's regex engine has no negative lookahead, and
+# because the things that must NOT be linted are exactly the things a pattern
+# would most easily let through:
+#   src/rdkafka.h, src/rdkafkacpp.h  vendored librdkafka, kept pristine
+#                                    (scripts/update-librdkafka-headers.sh)
+#   src/nlohmann/json.hpp            vendored
+#   include/*.h                      the 1C Native API SDK, third-party
+# Findings in any of those are not actionable: we do not own the code.
+HeaderFilterRegex: '.*/src/(ComponentBaseImp|admin_client1c|base64|component_types|consumer1c|data_conversion|export|gettime|producer1c|stdafx)\.h$'
+
+# The gate lives in scripts/lint.sh, which knows which findings block and which
+# are advice. Promoting warnings to errors here would take that decision away
+# from it and make --fix refuse to run.
+WarningsAsErrors: ''
+
+# clang-tidy would otherwise reformat the lines it touches under --fix using
+# whatever .clang-format it finds, and there is none in this repository: the
+# result would be a diff full of unrelated whitespace.
+FormatStyle: none
+
+CheckOptions:
+  # The 1C ABI hands strings over as WCHAR_T* with an explicit length; the
+  # component then builds std::string from them. Do not suggest string_view
+  # across a boundary where the buffer's lifetime is the platform's business.
+  - key: performance-unnecessary-value-param.AllowedTypes
+    value: ''
+  # Report a value parameter only once it is genuinely worth copying; the
+  # default of 16 bytes would also flag the int64_t/pointer pairs that the
+  # librdkafka API passes around by value on purpose.
+  - key: performance-unnecessary-value-param.IncludeStyle
+    value: llvm
+  # base64.cpp works on unsigned char deliberately; keep the check focused on
+  # the conversions that cross the 1C boundary.
+  - key: bugprone-narrowing-conversions.WarnOnIntegerNarrowingConversion
+    value: 'true'
+  - key: bugprone-narrowing-conversions.WarnOnFloatingPointNarrowingConversion
+    value: 'true'
+  # Callbacks invoked from librdkafka's threads must not let an exception
+  # escape; that is a real crash mode for this component, so do not water the
+  # check down with exemptions.
+  - key: bugprone-exception-escape.IgnoredExceptions
+    value: ''

@@ -3,6 +3,40 @@
 
 using namespace KafkaExport::KafkaAdminClient1C;
 //---------------------------------------------------------------------------//
+namespace {
+// The broker list comes straight from 1C and is echoed back in ErrorDescription,
+// which the platform copies through IMemoryManager. Cap it so a pathological
+// argument cannot turn one error message into a multi-megabyte allocation.
+// Kept byte-identical in producer1c_core.cpp, consumer1c_core.cpp and
+// admin_client1c_core.cpp so the three classes report the same thing.
+const size_t kMaxBrokersInMessage = 200;
+
+std::string BrokersForMessage(const std::string& brokers)
+{
+	if (brokers.size() <= kMaxBrokersInMessage) {
+		return brokers;
+	}
+
+	// The cut has to land on a UTF-8 character boundary. The finished message goes
+	// through allocString(), which converts it to UTF-16 with iconv, and a trailing
+	// half sequence makes iconv stop with EILSEQ - the script would then read an
+	// EMPTY ErrorDescription instead of "no usable broker address in ...", so the
+	// diagnostic would destroy itself exactly when a non-ASCII broker string is what
+	// went wrong. Continuation bytes are 10xxxxxx and a UTF-8 sequence is at most
+	// four bytes long, so stepping back over at most three of them always reaches
+	// the start of the character that straddles the limit: well-formed input stays
+	// well-formed. Input that is already ill-formed cannot be repaired here and is
+	// left as it is rather than silently rewritten.
+	size_t cut = kMaxBrokersInMessage;
+	const size_t min_cut = cut > 3 ? cut - 3 : 0;
+	while ((cut > min_cut) && ((static_cast<unsigned char>(brokers[cut]) & 0xC0) == 0x80)) {
+		--cut;
+	}
+
+	return brokers.substr(0, cut) + "...";
+}
+} // namespace
+//---------------------------------------------------------------------------//
 KafkaAdminClientCore::KafkaAdminClientCore()
 {
 	rk = nullptr;
@@ -61,8 +95,11 @@ KafkaExport::RetValue KafkaAdminClientCore::Initialize(std::string _brokers)
 		rk = nullptr;
 	}
 
+	// ERR_BADPARAMETR, not ERR_UNHANDLED: a missing argument is a caller mistake, and
+	// the producer has always reported it that way. Same code and same wording in all
+	// three classes.
 	if (_brokers.empty()) {
-		res.error = err(ERR_UNHANDLED, "brokers addresses is empty");
+		res.error = err(ERR_BADPARAMETR, "empty broker address");
 		return res;
 	}
 
@@ -71,18 +108,64 @@ KafkaExport::RetValue KafkaAdminClientCore::Initialize(std::string _brokers)
 	if (!res.succes) {
 		return res;
 	}
-	
+
+	// GlobalConfDefaultInit() left res.succes == true. Every failure from here on has
+	// to clear it again, otherwise Initialize() reports success while carrying an
+	// error description - which is what used to happen when rd_kafka_new() failed.
+	res.succes = false;
+
 	try{
 		rk_conf = rd_kafka_conf_dup(conf);
 	}
 	catch (...) {
+		rk_conf = nullptr;
+	}
+
+	// A null conf is not "use the defaults" here: rd_kafka_new() would happily build
+	// a client with no bootstrap.servers and no security.protocol, so an SSL setup
+	// would silently come up as an unconfigured plaintext one. Refuse instead.
+	if (rk_conf == nullptr) {
 		res.error = err(ERR_UNHANDLED, "rd_kafka_conf_dup error");
 		return res;
 	}
-	
+
+	errbuf[0] = '\0';
 	rk = rd_kafka_new(RD_KAFKA_PRODUCER, rk_conf, errbuf, sizeof(errbuf));
 	if (!rk) {
-		res.error = err(ERR_UNHANDLED, errbuf);
+		// rd_kafka_new() consumes the conf only when it succeeds; on failure this
+		// object still owns it. Releasing it here rather than leaving it to the
+		// destructor keeps rk_conf and rk consistent (both null == nothing owned).
+		rd_kafka_conf_destroy(rk_conf);
+		rk_conf = nullptr;
+		res.error = err(ERR_UNHANDLED,
+		                errbuf[0] != '\0' ? errbuf : "rd_kafka_new error");
+		return res;
+	}
+
+	// Consumed by rd_kafka_new(); rd_kafka_destroy(rk) frees it. Dropping the
+	// pointer keeps the invariant "rk_conf != nullptr means this object owns it"
+	// true on every path, so it can never dangle.
+	rk_conf = nullptr;
+
+	// librdkafka never rejects a bootstrap list at configuration time: setting
+	// "bootstrap.servers" only stores the string, and rd_kafka_new() reports an
+	// unparseable list through its log ("No brokers configured") instead of failing.
+	// rd_kafka_brokers_add() re-runs librdkafka's own parser over the same list on
+	// the live handle and returns how many brokers it yielded; re-adding the identical
+	// list is idempotent, because a broker that is already RD_KAFKA_CONFIGURED is
+	// counted rather than duplicated. A count of zero means librdkafka derived no
+	// broker at all from the string, so the client can never connect - the same dead
+	// end as an empty address, which is already rejected above. Anything that yields
+	// at least one broker is left alone: that is librdkafka's verdict, and second
+	// -guessing it here would reject host names librdkafka accepts.
+	if (rd_kafka_brokers_add(rk, brokers.c_str()) == 0) {
+		// rd_kafka_new() took ownership of rk_conf, so rd_kafka_destroy() frees it too;
+		// clearing both pointers keeps the (rk_conf != nullptr && rk == nullptr) guard in
+		// the destructor and at the top of Initialize() from freeing it a second time.
+		rd_kafka_destroy(rk);
+		rk_conf = nullptr;
+		rk = nullptr;
+		res.error = err(ERR_BADPARAMETR, "no usable broker address in \"" + BrokersForMessage(brokers) + "\"");
 		return res;
 	}
 
@@ -120,11 +203,15 @@ KafkaExport::RetValue KafkaAdminClientCore::GlobalConfDefaultInit(std::string _b
 		return res;
 	}
 
-	if (!_brokers.empty()) {	
+	// The conf-set result is checked and a failure returns immediately: carrying on
+	// would leave a half-configured conf behind and would overwrite the error that
+	// actually explains what went wrong. Identical in the producer and in the consumer.
+	if (!_brokers.empty()) {
 		if (rd_kafka_conf_set(conf, "bootstrap.servers", _brokers.c_str(), errbuf,
 		                     	sizeof(errbuf)) != RD_KAFKA_CONF_OK) {
 			res.error = err(ERR_UNHANDLED, errbuf);
-		}     
+			return res;
+		}
 	}
 	res.succes = res.error.type == ERR_SUCCESS;
 	return res;
