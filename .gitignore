@@ -8,6 +8,9 @@
 /out32/
 /out64/
 
+# ZIP layouts built by scripts/package-addin.sh
+/dist/
+
 # librdkafka + vcpkg archives built locally by scripts/build-librdkafka-windows.ps1;
 # they must never be committed (lib/win64/README.md, BUILD.md section 4.4)
 /lib/win32/*.lib
